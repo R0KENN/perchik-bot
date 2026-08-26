@@ -93,6 +93,12 @@ def shifts_word(n: int) -> str:
 
 WEEKDAYS = ["Воскресенье", "Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота"]
 WEEKDAYS_SHORT = ["ВС", "ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ"]
+MONTHS_RU = ["", "январь", "февраль", "март", "апрель", "май", "июнь",
+             "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"]
+
+
+def month_ru(d: date) -> str:
+    return f"{MONTHS_RU[d.month].capitalize()} {d.year}"
 
 PREV_LABEL = {
     "today": "вчера",
@@ -220,7 +226,7 @@ def render_sites(code: str) -> str:
             details.append(f"🪙 {int(r['tokens'])} tk")
         if gains.get(r["site"]):
             details.append(f"👥 +{gains[r['site']]}")
-        details.append(f"🧾 {r['shifts']} смен")
+        details.append(f"🧾 {shifts_word(r['shifts'])}")
         out.append("   " + " · ".join(details))
         out.append("")
 
