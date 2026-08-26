@@ -5,15 +5,22 @@ from datetime import date, datetime, timedelta
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramUnauthorizedError
+from aiogram.exceptions import TelegramBadRequest, TelegramUnauthorizedError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import BufferedInputFile, CallbackQuery, Message, ReactionTypeEmoji
-from aiogram.exceptions import TelegramBadRequest, TelegramUnauthorizedError
 
 import charts
 import storage
 from article import extract_text
-from config import BOT_TOKEN, CHECKS_TOPIC_ID, GROUP_ID, IMPORT_TOPIC_ID, STATS_TOPIC_ID, TZ
+from config import (
+    ALWAYS_SHOW,
+    BOT_TOKEN,
+    CHECKS_TOPIC_ID,
+    GROUP_ID,
+    IMPORT_TOPIC_ID,
+    STATS_TOPIC_ID,
+    TZ,
+)
 from keyboards import PERIODS, charts_kb, main_menu, sites_kb, stats_kb
 from parser import parse_check
 
@@ -49,6 +56,8 @@ def resolve_period(code: str) -> tuple[date, date, str]:
         return t - timedelta(days=29), t, "30 дней"
     if code == "90":
         return t - timedelta(days=89), t, "90 дней"
+    if code == "365":
+        return t - timedelta(days=364), t, "Год"
     if code == "cur":
         return t.replace(day=1), t, "Текущий месяц"
     if code == "prev":
@@ -57,6 +66,17 @@ def resolve_period(code: str) -> tuple[date, date, str]:
         return prev_end.replace(day=1), prev_end, "Прошлый месяц"
     start = storage.first_date() or t
     return start, t, "Всё время"
+
+
+def site_rows(d_from: date, d_to: date) -> list[dict]:
+    """Все площадки за период + те, что должны быть видны всегда."""
+    rows = [dict(r) for r in storage.by_site(d_from, d_to)]
+    known = {r["site"] for r in rows}
+    for site in ALWAYS_SHOW:
+        if site not in known:
+            rows.append({"site": site, "usd": 0.0, "tokens": 0, "shifts": 0})
+    rows.sort(key=lambda r: (-r["usd"], r["site"]))
+    return rows
 
 
 def render_stats(code: str) -> str:
@@ -84,10 +104,13 @@ def render_stats(code: str) -> str:
     if s["tokens"]:
         lines.append(f"🪙 Токенов: <b>{int(s['tokens'])}</b>")
 
-    rows = storage.by_site(d_from, d_to)
+    rows = site_rows(d_from, d_to)
     if rows:
         lines += ["", "<b>По сайтам:</b>"]
         for r in rows:
+            if not r["usd"]:
+                lines.append(f"• {r['site']} — <i>нет данных</i>")
+                continue
             share = (r["usd"] / s["usd"] * 100) if s["usd"] else 0
             g = gains.get(r["site"], 0)
             suffix = f" · +{g} 👥" if g else ""
@@ -106,7 +129,7 @@ def render_stats(code: str) -> str:
 
 def render_sites(code: str) -> str:
     d_from, d_to, title = resolve_period(code)
-    rows = storage.by_site(d_from, d_to)
+    rows = site_rows(d_from, d_to)
     if not rows:
         return f"🌐 <b>{title}</b>\nДанных нет."
 
@@ -118,6 +141,10 @@ def render_sites(code: str) -> str:
         "",
     ]
     for r in rows:
+        if not r["usd"]:
+            out.append(f"<b>{r['site']}</b> — <i>нет данных за период</i>")
+            out.append("")
+            continue
         share = r["usd"] / total * 100
         bar = "█" * max(1, round(share / 5))
         out.append(f"<b>{r['site']}</b> — {money(r['usd'])} ({share:.1f}%)")
@@ -138,15 +165,6 @@ def render_sites(code: str) -> str:
         for site, n in cur.items():
             out.append(f"   {site} — {n}")
     return "\n".join(out)
-
-def site_rows(d_from: date, d_to: date) -> list[dict]:
-    rows = [dict(r) for r in storage.by_site(d_from, d_to)]
-    known = {r["site"] for r in rows}
-    for site in ALWAYS_SHOW:
-        if site not in known:
-            rows.append({"site": site, "usd": 0.0, "tokens": 0, "shifts": 0})
-    rows.sort(key=lambda r: (-r["usd"], r["site"]))
-    return rows
 
 # ---------- служебные команды ----------
 
@@ -208,6 +226,23 @@ async def cmd_dump(message: Message):
 async def cmd_dedupe(message: Message):
     n = storage.dedupe()
     await message.reply(f"🧹 Удалено дублей: {n}")
+
+
+@utils_router.message(Command("sites"))
+async def cmd_sites(message: Message):
+    rows = storage.all_sites()
+    if not rows:
+        await message.reply("В базе пока нет площадок.")
+        return
+    body = "\n".join(
+        f"• <b>{r['site']}</b> — {r['n']} записей, {money(r['usd'] or 0)}" for r in rows
+    )
+    await message.reply(
+        f"🌐 <b>Все площадки в базе</b>\n{body}\n\n"
+        "<i>Если название криво или площадки не хватает — добавь её "
+        "в SITE_ALIASES в config.py.</i>",
+        parse_mode=ParseMode.HTML,
+    )
 
 # ---------- сбор чеков ----------
 
