@@ -1,0 +1,28 @@
+# Секреты — НИКОГДА не коммитить
+.env
+*.env
+!.env.example
+
+# База с данными
+*.db
+*.db-journal
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# VS Code
+.vscode/*
+!.vscode/launch.json
+
+# Прочее
+*.log
+*.png
+!assets/*.png
+.DS_Store
+Thumbs.db

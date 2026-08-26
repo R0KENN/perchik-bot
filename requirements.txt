@@ -1,0 +1,4 @@
+aiogram>=3.28,<4
+python-dotenv>=1.0
+matplotlib>=3.9
+tzdata; sys_platform == "win32"
