@@ -19,3 +19,41 @@ python -m venv .venv
 pip install -r requirements.txt
 cp .env.example .env          # затем заполнить
 python bot.py
+
+Настройка
+Создать бота в @BotFather, в /setprivacy выставить Disable.
+Добавить бота в супергруппу с включёнными топиками, дать права админа.
+Отправить /id в нужных топиках, перенести значения в .env.
+Перезапустить бота.
+
+Команды
+Команда	Что делает
+/stats или «Перчик дай стату»	Сводка с кнопками
+/last	Последние распознанные чеки
+/dump (ответом на чек)	Показать, что бот вытащил из сообщения
+/forget (ответом на чек)	Удалить чек из базы
+/dedupe	Убрать дубли после импорта
+/id	ID чата и текущего топика
+
+Структура
+Файл	Назначение
+bot.py	Точка входа, хендлеры
+parser.py	Разбор текста чека
+article.py	Разворачивание статей Telegram в текст
+storage.py	SQLite, запросы, расчёт прироста
+charts.py	Графики на matplotlib
+keyboards.py	Инлайн-клавиатуры
+import_json.py	Импорт из JSON-экспорта Telegram Desktop
+
+Добавить новую площадку
+Дописать алиас в SITE_ALIASES в config.py.
+
+## Шаг 4. Проверка перед первым коммитом
+
+Убедись, что Git установлен (`git --version`). Если нет — качай с [git-scm.com](https://git-scm.com/download/win), при установке всё по умолчанию.
+
+Первый раз нужно представиться:
+
+```powershell
+git config --global user.name "Твоё имя"
+git config --global user.email "твой@email.com"
