@@ -62,6 +62,14 @@ def period_row(prefix: str, active: str, codes=("7", "30", "cur", "all")) -> lis
         for c in codes
     ]
 
+def period_row2(prefix: str, active: str) -> list[InlineKeyboardButton]:
+    return [
+        InlineKeyboardButton(
+            text=("• " if c == active else "") + PERIODS[c],
+            callback_data=f"{prefix}:{c}",
+        )
+        for c in ("today", "90", "365")
+    ]
 
 def sites_kb(period: str) -> InlineKeyboardMarkup:
     return back_kb([

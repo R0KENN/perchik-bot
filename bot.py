@@ -283,7 +283,7 @@ def render_goal() -> str:
     bar = "█" * filled + "░" * (20 - filled)
 
     lines = [
-        f"🎯 <b>Цель на {t.strftime('%B %Y')}</b>",
+        f"🎯 <b>Цель на {month_ru(t)}</b>",
         "",
         f"<code>{bar}</code> {pct:.0f}%",
         f"💰 {money(earned)} из {money(goal)}",
@@ -376,7 +376,7 @@ def render_eff(code: str) -> str:
             out.append(f"<code>{bar}</code>")
         else:
             out.append(f"<b>{site}</b> — <i>нет данных о часах</i>")
-        out.append(f"   💰 {money(usd)} · 🧾 {shifts} смен · {money(per_shift)} за смену")
+        out.append(f"   💰 {money(usd)} · 🧾 {shifts_word(shifts)} · {money(per_shift)} за смену")
         out.append("")
 
     weak = [r for r in ranked if r[3] is not None]
@@ -741,7 +741,7 @@ async def weekly_report(bot: Bot) -> None:
 async def monthly_report(bot: Bot) -> None:
     prev_end = today().replace(day=1) - timedelta(days=1)
     d_from = prev_end.replace(day=1)
-    title = prev_end.strftime("%B %Y")
+    title = month_ru(prev_end)
     await send_report(bot, d_from, prev_end, title, "prev", "📆 <b>Итоги месяца</b>")
 
 
@@ -778,7 +778,7 @@ async def main():
     storage.init_db()
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
-    dp.include_routers(utils_router, checks_router, stats_router, debug_router)
+    dp.include_routers(utils_router, stats_router, checks_router, debug_router)
 
     try:
         me = await bot.get_me()
@@ -795,7 +795,8 @@ async def main():
         )
         await bot.delete_webhook(drop_pending_updates=True)
         if AUTO_REPORTS:
-            asyncio.create_task(scheduler(bot))
+            report_task = asyncio.create_task(scheduler(bot))
+            report_task.add_done_callback(lambda t: t.exception())
             log.info(
                 "Автоотчёты включены: %s %02d:00 (неделя), 1-е число %02d:00 (месяц)",
                 WEEKDAYS[(REPORT_WEEKDAY + 1) % 7], REPORT_HOUR, MONTH_REPORT_HOUR,
