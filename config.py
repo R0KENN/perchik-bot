@@ -42,3 +42,6 @@ SITE_ALIASES = {
     "livejasmin": "LiveJasmin",
     "stripcash": "StripCash",
 }
+
+# Сайты, которые показываются в статистике всегда, даже с нулём за период.
+ALWAYS_SHOW = ["Chaturbate", "Stripchat", "Camsoda", "CAM4", "PlayBoy"]

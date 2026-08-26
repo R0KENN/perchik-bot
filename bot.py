@@ -8,6 +8,7 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import BufferedInputFile, CallbackQuery, Message, ReactionTypeEmoji
+from aiogram.exceptions import TelegramBadRequest, TelegramUnauthorizedError
 
 import charts
 import storage
@@ -138,6 +139,14 @@ def render_sites(code: str) -> str:
             out.append(f"   {site} — {n}")
     return "\n".join(out)
 
+def site_rows(d_from: date, d_to: date) -> list[dict]:
+    rows = [dict(r) for r in storage.by_site(d_from, d_to)]
+    known = {r["site"] for r in rows}
+    for site in ALWAYS_SHOW:
+        if site not in known:
+            rows.append({"site": site, "usd": 0.0, "tokens": 0, "shifts": 0})
+    rows.sort(key=lambda r: (-r["usd"], r["site"]))
+    return rows
 
 # ---------- служебные команды ----------
 
@@ -257,19 +266,33 @@ async def on_check_edited(message: Message, bot: Bot):
 
 # ---------- статистика ----------
 
+async def show(call: CallbackQuery, text: str, kb) -> None:
+    """Правит текст сообщения; под фото — присылает новое."""
+    if call.message.photo or call.message.text is None:
+        await call.message.answer(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+        return
+    try:
+        await call.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+    except TelegramBadRequest as e:
+        if "not modified" in str(e):
+            return
+        await call.message.answer(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+
 @stats_router.message(Command("stats"))
-@stats_router.message(F.text.regexp(r"(?i)^\s*перчик\b"))
+@stats_router.message(F.text.regexp(r"(?i)^\s*(перчик|перец|перчику|стат[ауы]?|статистика)\b"))
 async def cmd_stats(message: Message):
     text = (message.text or "").lower()
     code = "30"
-    if "недел" in text or "7" in text:
+    if "недел" in text or " 7" in text:
         code = "7"
     elif "месяц" in text:
         code = "cur"
-    elif "всё" in text or "все время" in text or "всего" in text:
+    elif "всё" in text or "все врем" in text or "всего" in text:
         code = "all"
-    elif "сегодня" in text:
+    elif "сегодня" in text or "смена" in text:
         code = "today"
+    elif "год" in text:
+        code = "365"
 
     await message.answer(
         render_stats(code),
@@ -302,10 +325,10 @@ async def cmd_last(message: Message):
 
 @stats_router.callback_query(F.data == "menu")
 async def cb_menu(call: CallbackQuery):
-    await call.message.edit_text(
+    await show(
+        call,
         "🌶 <b>Перчик · меню статистики</b>\nВыбери период или раздел:",
-        reply_markup=main_menu(),
-        parse_mode=ParseMode.HTML,
+        main_menu(),
     )
     await call.answer()
 
@@ -313,24 +336,14 @@ async def cb_menu(call: CallbackQuery):
 @stats_router.callback_query(F.data.startswith("st:"))
 async def cb_stats(call: CallbackQuery):
     code = call.data.split(":")[1]
-    try:
-        await call.message.edit_text(
-            render_stats(code), reply_markup=stats_kb(code), parse_mode=ParseMode.HTML
-        )
-    except Exception:
-        pass
+    await show(call, render_stats(code), stats_kb(code))
     await call.answer(PERIODS.get(code, ""))
 
 
 @stats_router.callback_query(F.data.startswith("sites:"))
 async def cb_sites(call: CallbackQuery):
     code = call.data.split(":")[1]
-    try:
-        await call.message.edit_text(
-            render_sites(code), reply_markup=sites_kb(code), parse_mode=ParseMode.HTML
-        )
-    except Exception:
-        pass
+    await show(call, render_sites(code), sites_kb(code))
     await call.answer()
 
 
@@ -338,11 +351,7 @@ async def cb_sites(call: CallbackQuery):
 async def cb_charts_menu(call: CallbackQuery):
     code = call.data.split(":")[1]
     _, _, title = resolve_period(code)
-    await call.message.edit_text(
-        f"📊 <b>Графики · {title}</b>\nВыбери, что нарисовать:",
-        reply_markup=charts_kb(code),
-        parse_mode=ParseMode.HTML,
-    )
+    await show(call, f"📊 <b>Графики · {title}</b>\nВыбери, что нарисовать:", charts_kb(code))
     await call.answer()
 
 

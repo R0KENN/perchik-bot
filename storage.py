@@ -160,11 +160,14 @@ def by_site(d_from: date, d_to: date) -> list[sqlite3.Row]:
     with db() as conn:
         return conn.execute(
             """
-            SELECT e.site, SUM(e.usd) AS usd, SUM(e.tokens) AS tokens,
-                   COUNT(DISTINCT s.id) AS shifts
+            SELECT e.site,
+                   COALESCE(SUM(e.usd), 0)    AS usd,
+                   COALESCE(SUM(e.tokens), 0) AS tokens,
+                   COUNT(DISTINCT s.id)       AS shifts
             FROM entries e JOIN shifts s ON s.id = e.shift_id
             WHERE s.shift_date BETWEEN ? AND ?
-            GROUP BY e.site HAVING usd > 0 ORDER BY usd DESC
+            GROUP BY e.site
+            ORDER BY usd DESC, e.site
             """,
             (d_from.isoformat(), d_to.isoformat()),
         ).fetchall()
@@ -244,4 +247,12 @@ def last_shifts(limit: int = 5) -> list[sqlite3.Row]:
             "SELECT shift_date, total_usd, time_start, time_end FROM shifts"
             " ORDER BY shift_date DESC, id DESC LIMIT ?",
             (limit,),
+        ).fetchall()
+
+def all_sites() -> list[sqlite3.Row]:
+    """Все площадки, что вообще встречались в чеках."""
+    with db() as conn:
+        return conn.execute(
+            "SELECT site, COUNT(*) AS n, SUM(usd) AS usd FROM entries"
+            " GROUP BY site ORDER BY n DESC"
         ).fetchall()
