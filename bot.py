@@ -8,7 +8,13 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramUnauthorizedError
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import BufferedInputFile, CallbackQuery, Message, ReactionTypeEmoji
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    ChatMemberUpdated,
+    Message,
+    ReactionTypeEmoji,
+)
 
 import charts
 import storage
@@ -39,6 +45,63 @@ utils_router = Router(name="utils")
 checks_router = Router(name="checks")
 stats_router = Router(name="stats")
 debug_router = Router(name="debug")
+
+guard_router = Router(name="guard")
+
+# ---------- доступ ----------
+# Бот работает только в GROUP_ID. Всем остальным — от ворот поворот.
+
+DENY_TEXT = "Ты че стучишься ?? Тебя не звали"
+_denied_at: dict[int, float] = {}
+
+
+def foreign_chat(event) -> bool:
+    """True для любого чата, кроме нашей группы."""
+    return event.chat.id != GROUP_ID
+
+
+def foreign_callback(call: CallbackQuery) -> bool:
+    return call.message is None or call.message.chat.id != GROUP_ID
+
+
+@guard_router.message(foreign_chat)
+async def deny_message(message: Message) -> None:
+    u = message.from_user
+    log.info(
+        "Чужой чат %s (%s) от %s (@%s)",
+        message.chat.id, message.chat.type,
+        u.id if u else "?", u.username if u else "?",
+    )
+    # отвечаем не чаще раза в 10 минут на чат, чтобы не кормить спамеров
+    now = datetime.now(TZ).timestamp()
+    if now - _denied_at.get(message.chat.id, 0) < 600:
+        return
+    _denied_at[message.chat.id] = now
+    try:
+        await message.answer(DENY_TEXT)
+    except Exception as e:
+        log.info("Ответить не смог: %s", e)
+
+
+@guard_router.edited_message(foreign_chat)
+async def deny_edited(message: Message) -> None:
+    return
+
+
+@guard_router.callback_query(foreign_callback)
+async def deny_callback(call: CallbackQuery) -> None:
+    await call.answer(DENY_TEXT, show_alert=True)
+
+
+@guard_router.my_chat_member(foreign_chat)
+async def leave_foreign(event: ChatMemberUpdated, bot: Bot) -> None:
+    """Если добавили в посторонний чат — выходим."""
+    if event.chat.type in ("group", "supergroup", "channel"):
+        log.warning("Добавили в чужой чат %s — выхожу", event.chat.id)
+        try:
+            await bot.leave_chat(event.chat.id)
+        except Exception as e:
+            log.info("Выйти не смог: %s", e)
 
 
 # ---------- вспомогательное ----------
@@ -778,7 +841,7 @@ async def main():
     storage.init_db()
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
-    dp.include_routers(utils_router, stats_router, checks_router, debug_router)
+    dp.include_routers(guard_router, utils_router, stats_router, checks_router, debug_router)
 
     try:
         me = await bot.get_me()
