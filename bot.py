@@ -1,4 +1,5 @@
 import asyncio
+import calendar
 import logging
 from datetime import date, datetime, timedelta
 
@@ -6,7 +7,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramUnauthorizedError
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import BufferedInputFile, CallbackQuery, Message, ReactionTypeEmoji
 
 import charts
@@ -14,14 +15,18 @@ import storage
 from article import extract_text
 from config import (
     ALWAYS_SHOW,
+    AUTO_REPORTS,
     BOT_TOKEN,
     CHECKS_TOPIC_ID,
     GROUP_ID,
     IMPORT_TOPIC_ID,
+    MONTH_REPORT_HOUR,
+    REPORT_HOUR,
+    REPORT_WEEKDAY,
     STATS_TOPIC_ID,
     TZ,
 )
-from keyboards import PERIODS, charts_kb, main_menu, sites_kb, stats_kb
+from keyboards import PERIODS, charts_kb, goal_kb, main_menu, simple_kb, sites_kb, stats_kb
 from parser import parse_check
 
 logging.basicConfig(
@@ -79,8 +84,52 @@ def site_rows(d_from: date, d_to: date) -> list[dict]:
     return rows
 
 
+WEEKDAYS = ["Воскресенье", "Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота"]
+
+PREV_LABEL = {
+    "today": "вчера",
+    "7": "прошлой неделе",
+    "30": "прошлым 30 дням",
+    "90": "прошлым 90 дням",
+    "365": "прошлому году",
+    "cur": "прошлому месяцу",
+    "prev": "позапрошлому месяцу",
+}
+
+
+def prev_range(code: str, d_from: date, d_to: date) -> tuple[date, date] | None:
+    """Предыдущий сопоставимый период."""
+    if code == "all":
+        return None
+    if code in ("cur", "prev"):
+        prev_last = d_from - timedelta(days=1)
+        p_from = prev_last.replace(day=1)
+        p_to = min(prev_last, p_from + timedelta(days=(d_to - d_from).days))
+        return p_from, p_to
+    n = (d_to - d_from).days + 1
+    return d_from - timedelta(days=n), d_from - timedelta(days=1)
+
+
+def delta_line(cur_usd: float, code: str, d_from: date, d_to: date) -> str | None:
+    rng = prev_range(code, d_from, d_to)
+    if not rng:
+        return None
+    prev = storage.period_summary(rng[0], rng[1])
+    if not prev["shifts"] or not prev["usd"]:
+        return None
+    label = PREV_LABEL.get(code, "прошлому периоду")
+    diff = cur_usd - prev["usd"]
+    pct = diff / prev["usd"] * 100
+    arrow = "🔺" if diff > 0 else ("🔻" if diff < 0 else "▪️")
+    return f"{arrow} <b>{pct:+.0f}%</b> к {label} ({money(prev['usd'])})"
+
+
 def render_stats(code: str) -> str:
     d_from, d_to, title = resolve_period(code)
+    return render_stats_range(d_from, d_to, title, code)
+
+
+def render_stats_range(d_from: date, d_to: date, title: str, code: str = "") -> str:
     s = storage.period_summary(d_from, d_to)
     if not s["shifts"]:
         return f"🌶 <b>{title}</b>\nПока нет ни одного чека за этот период."
@@ -94,6 +143,11 @@ def render_stats(code: str) -> str:
         f"<i>{d_from.strftime('%d.%m.%Y')} — {d_to.strftime('%d.%m.%Y')}</i>",
         "",
         f"💰 Заработано: <b>{money(s['usd'])}</b>",
+    ]
+    d = delta_line(s["usd"], code, d_from, d_to)
+    if d:
+        lines.append(d)
+    lines += [
         f"🧾 Смен: <b>{s['shifts']}</b>" + (f" ({s['hours']:.1f} ч)" if s["hours"] else ""),
         f"📈 Средняя смена: <b>{money(avg)}</b>",
     ]
@@ -124,8 +178,11 @@ def render_stats(code: str) -> str:
     if s["best_date"]:
         best = date.fromisoformat(s["best_date"])
         lines += ["", f"🏆 Лучшая смена: {best.strftime('%d.%m')} — {money(s['best_usd'])}"]
-    return "\n".join(lines)
 
+    goal_hint = goal_progress_line()
+    if goal_hint:
+        lines += ["", goal_hint]
+    return "\n".join(lines)
 
 def render_sites(code: str) -> str:
     d_from, d_to, title = resolve_period(code)
@@ -164,6 +221,156 @@ def render_sites(code: str) -> str:
         out.append("👤 <b>Всего подписчиков сейчас:</b>")
         for site, n in cur.items():
             out.append(f"   {site} — {n}")
+    return "\n".join(out)
+
+# ---------- цель на месяц ----------
+
+def _month_bounds(d: date) -> tuple[date, date, int]:
+    last_day = calendar.monthrange(d.year, d.month)[1]
+    return d.replace(day=1), d.replace(day=last_day), last_day
+
+
+def goal_progress_line() -> str | None:
+    """Короткая строчка про цель — подмешивается в сводку."""
+    t = today()
+    goal = storage.get_goal(t.strftime("%Y-%m"))
+    if not goal:
+        return None
+    first, _, _ = _month_bounds(t)
+    earned = storage.period_summary(first, t)["usd"]
+    pct = earned / goal * 100
+    return f"🎯 Цель месяца: {money(earned)} / {money(goal)} ({pct:.0f}%)"
+
+
+def render_goal() -> str:
+    t = today()
+    ym = t.strftime("%Y-%m")
+    goal = storage.get_goal(ym)
+    first, last, days_in_month = _month_bounds(t)
+    s = storage.period_summary(first, t)
+    earned = s["usd"]
+
+    if not goal:
+        return (
+            "🎯 <b>Цель на месяц не задана</b>\n\n"
+            f"Заработано с 1-го числа: <b>{money(earned)}</b>\n\n"
+            "Задать цель: <code>/goal 3000</code>\n"
+            "Снять цель: <code>/goal 0</code>"
+        )
+
+    pct = earned / goal * 100
+    left = max(0.0, goal - earned)
+    days_passed = t.day
+    days_left = days_in_month - days_passed
+    pace = earned / days_passed if days_passed else 0
+    forecast = pace * days_in_month
+
+    filled = min(20, round(pct / 5))
+    bar = "█" * filled + "░" * (20 - filled)
+
+    lines = [
+        f"🎯 <b>Цель на {t.strftime('%B %Y')}</b>",
+        "",
+        f"<code>{bar}</code> {pct:.0f}%",
+        f"💰 {money(earned)} из {money(goal)}",
+    ]
+    if left:
+        lines.append(f"📌 Осталось добить: <b>{money(left)}</b>")
+    else:
+        lines.append("✅ Цель выполнена!")
+
+    lines += [
+        "",
+        f"📆 Прошло дней: {days_passed} из {days_in_month} (осталось {days_left})",
+        f"⚡ Текущий темп: {money(pace)} в день",
+        f"🔮 Прогноз на месяц: <b>{money(forecast)}</b>"
+        + (" ✅" if forecast >= goal else " ⚠️"),
+    ]
+    if left and days_left:
+        lines.append(f"🏃 Нужно по <b>{money(left / days_left)}</b> в день")
+    elif left and not days_left:
+        lines.append("⏳ Сегодня последний день месяца.")
+    return "\n".join(lines)
+
+
+# ---------- когда работать выгоднее ----------
+
+def render_when(code: str) -> str:
+    d_from, d_to, title = resolve_period(code)
+    dows = storage.by_weekday(d_from, d_to)
+    if not dows:
+        return f"🕒 <b>{title}</b>\nДанных нет."
+
+    out = [
+        f"🕒 <b>Когда смены прибыльнее · {title}</b>",
+        f"<i>{d_from.strftime('%d.%m.%Y')} — {d_to.strftime('%d.%m.%Y')}</i>",
+        "",
+        "<b>По дням недели</b> (средняя смена):",
+    ]
+    ordered = sorted(dows, key=lambda r: -(r["usd"] / r["shifts"] if r["shifts"] else 0))
+    top = ordered[0]["usd"] / ordered[0]["shifts"] if ordered[0]["shifts"] else 1
+    for r in ordered:
+        avg = r["usd"] / r["shifts"] if r["shifts"] else 0
+        bar = "█" * max(1, round(avg / top * 12))
+        out.append(
+            f"{WEEKDAYS[r['dow']][:2]} <code>{bar}</code> {money(avg)} · {r['shifts']} смен"
+        )
+
+    hours = storage.by_hour(d_from, d_to)
+    if hours:
+        out += ["", "<b>По времени начала смены:</b>"]
+        for r in sorted(hours, key=lambda x: -(x["usd"] / x["shifts"] if x["shifts"] else 0)):
+            avg = r["usd"] / r["shifts"] if r["shifts"] else 0
+            out.append(f"• {r['h']:02d}:00 — {money(avg)} за смену ({r['shifts']} смен)")
+
+    best = ordered[0]
+    if best["shifts"]:
+        out += [
+            "",
+            f"🏆 Лучший день: <b>{WEEKDAYS[best['dow']]}</b> — "
+            f"{money(best['usd'] / best['shifts'])} в среднем",
+        ]
+    return "\n".join(out)
+
+
+# ---------- эффективность площадок ----------
+
+def render_eff(code: str) -> str:
+    d_from, d_to, title = resolve_period(code)
+    rows = [r for r in storage.site_efficiency(d_from, d_to) if r["usd"]]
+    if not rows:
+        return f"⚡ <b>{title}</b>\nДанных нет."
+
+    ranked = []
+    for r in rows:
+        per_hour = r["usd"] / r["hours"] if r["hours"] else None
+        ranked.append((r["site"], r["usd"], r["shifts"], per_hour,
+                       r["usd"] / r["shifts"] if r["shifts"] else 0))
+    ranked.sort(key=lambda x: -(x[3] or 0))
+
+    out = [
+        f"⚡ <b>Эффективность площадок · {title}</b>",
+        f"<i>{d_from.strftime('%d.%m.%Y')} — {d_to.strftime('%d.%m.%Y')}</i>",
+        "",
+    ]
+    top = ranked[0][3] or 0
+    for site, usd, shifts, per_hour, per_shift in ranked:
+        if per_hour:
+            bar = "█" * max(1, round(per_hour / top * 12)) if top else ""
+            out.append(f"<b>{site}</b> — {money(per_hour)}/час")
+            out.append(f"<code>{bar}</code>")
+        else:
+            out.append(f"<b>{site}</b> — <i>нет данных о часах</i>")
+        out.append(f"   💰 {money(usd)} · 🧾 {shifts} смен · {money(per_shift)} за смену")
+        out.append("")
+
+    weak = [r for r in ranked if r[3] is not None]
+    if len(weak) > 1:
+        out.append(
+            f"🐌 Слабее всех: <b>{weak[-1][0]}</b> — {money(weak[-1][3])}/час "
+            f"против {money(weak[0][3])}/час у {weak[0][0]}."
+        )
+    out.append("<i>Часы смены засчитываются каждому сайту, где был доход.</i>")
     return "\n".join(out)
 
 # ---------- служебные команды ----------
@@ -243,6 +450,49 @@ async def cmd_sites(message: Message):
         "в SITE_ALIASES в config.py.</i>",
         parse_mode=ParseMode.HTML,
     )
+
+@utils_router.message(Command("goal"))
+async def cmd_goal(message: Message, command: CommandObject):
+    arg = (command.args or "").strip().replace(",", ".").replace("$", "")
+    if arg:
+        try:
+            amount = float(arg)
+        except ValueError:
+            await message.reply("Не понял сумму. Пример: <code>/goal 3000</code>",
+                                parse_mode=ParseMode.HTML)
+            return
+        ym = today().strftime("%Y-%m")
+        storage.set_goal(ym, amount)
+        if amount <= 0:
+            await message.reply("🎯 Цель на этот месяц снята.")
+            return
+        await message.reply(f"🎯 Цель на месяц: <b>{money(amount)}</b>", parse_mode=ParseMode.HTML)
+    await message.answer(render_goal(), reply_markup=goal_kb(), parse_mode=ParseMode.HTML)
+
+
+@utils_router.message(Command("when"))
+async def cmd_when(message: Message):
+    await message.answer(render_when("30"), reply_markup=simple_kb("when", "30"),
+                         parse_mode=ParseMode.HTML)
+
+
+@utils_router.message(Command("eff"))
+async def cmd_eff(message: Message):
+    await message.answer(render_eff("30"), reply_markup=simple_kb("eff", "30"),
+                         parse_mode=ParseMode.HTML)
+
+
+@utils_router.message(Command("report_week"))
+async def cmd_report_week(message: Message, bot: Bot):
+    await weekly_report(bot)
+    await message.reply("📨 Недельный отчёт отправлен.")
+
+
+@utils_router.message(Command("report_month"))
+async def cmd_report_month(message: Message, bot: Bot):
+    await monthly_report(bot)
+    await message.reply("📨 Месячный отчёт отправлен.")
+
 
 # ---------- сбор чеков ----------
 
@@ -389,6 +639,24 @@ async def cb_charts_menu(call: CallbackQuery):
     await show(call, f"📊 <b>Графики · {title}</b>\nВыбери, что нарисовать:", charts_kb(code))
     await call.answer()
 
+@stats_router.callback_query(F.data.startswith("goal:"))
+async def cb_goal(call: CallbackQuery):
+    await show(call, render_goal(), goal_kb())
+    await call.answer()
+
+
+@stats_router.callback_query(F.data.startswith("when:"))
+async def cb_when(call: CallbackQuery):
+    code = call.data.split(":")[1]
+    await show(call, render_when(code), simple_kb("when", code))
+    await call.answer()
+
+
+@stats_router.callback_query(F.data.startswith("eff:"))
+async def cb_eff(call: CallbackQuery):
+    code = call.data.split(":")[1]
+    await show(call, render_eff(code), simple_kb("eff", code))
+    await call.answer()
 
 @stats_router.callback_query(F.data.startswith("chart:"))
 async def cb_chart(call: CallbackQuery):
@@ -426,6 +694,68 @@ async def any_message(message: Message):
         getattr(message, "rich_message", None) is not None,
     )
 
+# ---------- автоотчёты ----------
+
+async def send_report(bot: Bot, d_from: date, d_to: date, title: str,
+                      code: str, head: str) -> None:
+    if not GROUP_ID:
+        log.warning("Автоотчёт пропущен: не задан GROUP_ID")
+        return
+    kw = {"message_thread_id": STATS_TOPIC_ID} if STATS_TOPIC_ID else {}
+    text = head + "\n\n" + render_stats_range(d_from, d_to, title, code)
+    await bot.send_message(GROUP_ID, text, reply_markup=stats_kb(code),
+                           parse_mode=ParseMode.HTML, **kw)
+    try:
+        png = await asyncio.to_thread(
+            charts.income_chart, storage.daily_money(d_from, d_to), d_from, d_to, title
+        )
+        await bot.send_photo(
+            GROUP_ID, BufferedInputFile(png, filename="report.png"),
+            caption=f"💰 Доход · {title}", **kw
+        )
+    except Exception as e:
+        log.warning("График к автоотчёту не построился: %s", e)
+
+
+async def weekly_report(bot: Bot) -> None:
+    t = today()
+    d_from, d_to = t - timedelta(days=6), t
+    await send_report(bot, d_from, d_to, "Неделя", "7", "📅 <b>Итоги недели</b>")
+
+
+async def monthly_report(bot: Bot) -> None:
+    prev_end = today().replace(day=1) - timedelta(days=1)
+    d_from = prev_end.replace(day=1)
+    title = prev_end.strftime("%B %Y")
+    await send_report(bot, d_from, prev_end, title, "prev", "📆 <b>Итоги месяца</b>")
+
+
+async def scheduler(bot: Bot) -> None:
+    """Каждые 5 минут проверяет, не пора ли слать отчёт. Дубли режет через meta."""
+    await asyncio.sleep(10)
+    while True:
+        try:
+            now = datetime.now(TZ)
+            if now.weekday() == REPORT_WEEKDAY and now.hour >= REPORT_HOUR:
+                iso = now.isocalendar()
+                key = f"week:{iso[0]}-{iso[1]}"
+                if storage.meta_get(key) is None:
+                    storage.meta_set(key, now.isoformat())
+                    log.info("Отправляю недельный автоотчёт")
+                    await weekly_report(bot)
+
+            if now.day == 1 and now.hour >= MONTH_REPORT_HOUR:
+                prev_end = now.date().replace(day=1) - timedelta(days=1)
+                key = f"month:{prev_end.strftime('%Y-%m')}"
+                if storage.meta_get(key) is None:
+                    storage.meta_set(key, now.isoformat())
+                    log.info("Отправляю месячный автоотчёт")
+                    await monthly_report(bot)
+        except Exception:
+            log.exception("Ошибка планировщика")
+        await asyncio.sleep(300)
+
+
 async def main():
     if not BOT_TOKEN:
         raise SystemExit("Не задан BOT_TOKEN в .env")
@@ -449,6 +779,12 @@ async def main():
             GROUP_ID, CHECKS_TOPIC_ID, IMPORT_TOPIC_ID or "—", STATS_TOPIC_ID,
         )
         await bot.delete_webhook(drop_pending_updates=True)
+        if AUTO_REPORTS:
+            asyncio.create_task(scheduler(bot))
+            log.info(
+                "Автоотчёты включены: %s %02d:00 (неделя), 1-е число %02d:00 (месяц)",
+                WEEKDAYS[(REPORT_WEEKDAY + 1) % 7], REPORT_HOUR, MONTH_REPORT_HOUR,
+            )
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         await bot.session.close()

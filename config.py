@@ -45,3 +45,11 @@ SITE_ALIASES = {
 
 # Сайты, которые показываются в статистике всегда, даже с нулём за период.
 ALWAYS_SHOW = ["Chaturbate", "Stripchat", "Camsoda", "CAM4", "PlayBoy"]
+
+
+# Автоотчёты. Недельный — в указанный день недели (0=пн … 6=вс) и час.
+# Месячный — 1-го числа в указанный час за прошлый месяц.
+REPORT_WEEKDAY = int(os.getenv("REPORT_WEEKDAY", "6"))
+REPORT_HOUR = int(os.getenv("REPORT_HOUR", "21"))
+MONTH_REPORT_HOUR = int(os.getenv("MONTH_REPORT_HOUR", "12"))
+AUTO_REPORTS = os.getenv("AUTO_REPORTS", "1") not in ("0", "false", "False", "")

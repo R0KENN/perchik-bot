@@ -34,6 +34,16 @@ CREATE TABLE IF NOT EXISTS entries (
 
 CREATE INDEX IF NOT EXISTS idx_shift_date ON shifts (shift_date);
 CREATE INDEX IF NOT EXISTS idx_entry_shift ON entries (shift_id);
+
+CREATE TABLE IF NOT EXISTS goals (
+    ym     TEXT PRIMARY KEY,
+    amount REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 # follows в чеке — это ОБЩЕЕ число подписчиков на конец смены (снимок).
@@ -255,4 +265,89 @@ def all_sites() -> list[sqlite3.Row]:
         return conn.execute(
             "SELECT site, COUNT(*) AS n, SUM(usd) AS usd FROM entries"
             " GROUP BY site ORDER BY n DESC"
+        ).fetchall()
+
+
+
+# ---------- цели на месяц ----------
+
+def set_goal(ym: str, amount: float) -> None:
+    """ym в формате '2026-08'. amount <= 0 — снять цель."""
+    with db() as conn:
+        if amount <= 0:
+            conn.execute("DELETE FROM goals WHERE ym = ?", (ym,))
+        else:
+            conn.execute(
+                "INSERT INTO goals (ym, amount) VALUES (?, ?)"
+                " ON CONFLICT (ym) DO UPDATE SET amount = excluded.amount",
+                (ym, amount),
+            )
+
+
+def get_goal(ym: str) -> float | None:
+    with db() as conn:
+        row = conn.execute("SELECT amount FROM goals WHERE ym = ?", (ym,)).fetchone()
+    return row["amount"] if row else None
+
+
+# ---------- служебная память бота (для автоотчётов) ----------
+
+def meta_get(key: str) -> str | None:
+    with db() as conn:
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def meta_set(key: str, value: str) -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?)"
+            " ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+
+# ---------- аналитика: дни недели, часы, эффективность ----------
+
+def by_weekday(d_from: date, d_to: date) -> list[sqlite3.Row]:
+    """0 = воскресенье … 6 = суббота (как в strftime('%w'))."""
+    with db() as conn:
+        return conn.execute(
+            "SELECT CAST(strftime('%w', shift_date) AS INTEGER) AS dow,"
+            " COUNT(*) AS shifts,"
+            " COALESCE(SUM(total_usd), 0) AS usd,"
+            " COALESCE(SUM(hours), 0) AS hours"
+            " FROM shifts WHERE shift_date BETWEEN ? AND ?"
+            " GROUP BY dow",
+            (d_from.isoformat(), d_to.isoformat()),
+        ).fetchall()
+
+
+def by_hour(d_from: date, d_to: date) -> list[sqlite3.Row]:
+    """Группировка по часу начала смены."""
+    with db() as conn:
+        return conn.execute(
+            "SELECT CAST(substr(time_start, 1, 2) AS INTEGER) AS h,"
+            " COUNT(*) AS shifts,"
+            " COALESCE(SUM(total_usd), 0) AS usd,"
+            " COALESCE(SUM(hours), 0) AS hours"
+            " FROM shifts WHERE shift_date BETWEEN ? AND ?"
+            "   AND time_start IS NOT NULL AND time_start <> ''"
+            " GROUP BY h ORDER BY h",
+            (d_from.isoformat(), d_to.isoformat()),
+        ).fetchall()
+
+
+def site_efficiency(d_from: date, d_to: date) -> list[sqlite3.Row]:
+    """Доход и часы по площадкам (часы смены засчитываются сайту, если он был в чеке)."""
+    with db() as conn:
+        return conn.execute(
+            "SELECT e.site AS site,"
+            " COALESCE(SUM(e.usd), 0) AS usd,"
+            " COALESCE(SUM(CASE WHEN e.usd > 0 THEN s.hours ELSE 0 END), 0) AS hours,"
+            " COUNT(DISTINCT CASE WHEN e.usd > 0 THEN s.id END) AS shifts"
+            " FROM entries e JOIN shifts s ON s.id = e.shift_id"
+            " WHERE s.shift_date BETWEEN ? AND ?"
+            " GROUP BY e.site ORDER BY usd DESC",
+            (d_from.isoformat(), d_to.isoformat()),
         ).fetchall()
