@@ -83,8 +83,16 @@ def site_rows(d_from: date, d_to: date) -> list[dict]:
     rows.sort(key=lambda r: (-r["usd"], r["site"]))
     return rows
 
+def shifts_word(n: int) -> str:
+    """1 смена / 2 смены / 5 смен."""
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} смена"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return f"{n} смены"
+    return f"{n} смен"
 
 WEEKDAYS = ["Воскресенье", "Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота"]
+WEEKDAYS_SHORT = ["ВС", "ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ"]
 
 PREV_LABEL = {
     "today": "вчера",
@@ -313,7 +321,8 @@ def render_when(code: str) -> str:
         avg = r["usd"] / r["shifts"] if r["shifts"] else 0
         bar = "█" * max(1, round(avg / top * 12))
         out.append(
-            f"{WEEKDAYS[r['dow']][:2]} <code>{bar}</code> {money(avg)} · {r['shifts']} смен"
+            f"<b>{WEEKDAYS_SHORT[r['dow']]}</b> <code>{bar}</code> "
+            f"{money(avg)} · {shifts_word(r['shifts'])}"
         )
 
     hours = storage.by_hour(d_from, d_to)
@@ -321,7 +330,7 @@ def render_when(code: str) -> str:
         out += ["", "<b>По времени начала смены:</b>"]
         for r in sorted(hours, key=lambda x: -(x["usd"] / x["shifts"] if x["shifts"] else 0)):
             avg = r["usd"] / r["shifts"] if r["shifts"] else 0
-            out.append(f"• {r['h']:02d}:00 — {money(avg)} за смену ({r['shifts']} смен)")
+            out.append(f"• {r['h']:02d}:00 — {money(avg)} за смену ({shifts_word(r['shifts'])})")
 
     best = ordered[0]
     if best["shifts"]:
