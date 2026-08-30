@@ -351,3 +351,76 @@ def site_efficiency(d_from: date, d_to: date) -> list[sqlite3.Row]:
             " GROUP BY e.site ORDER BY usd DESC",
             (d_from.isoformat(), d_to.isoformat()),
         ).fetchall()
+
+
+
+# ---------- ручная правка старых чеков ----------
+
+def shift_gaps(limit: int = 50) -> list[sqlite3.Row]:
+    """Смены, где сумма по сайтам не сходится с итогом чека."""
+    with db() as conn:
+        return conn.execute(
+            """
+            SELECT s.id, s.shift_date, s.total_usd,
+                   COALESCE(SUM(e.usd), 0)    AS sites_usd,
+                   COALESCE(SUM(e.tokens), 0) AS sites_tokens,
+                   COUNT(e.id)                AS n
+            FROM shifts s
+            LEFT JOIN entries e ON e.shift_id = s.id
+            GROUP BY s.id
+            HAVING ROUND(s.total_usd, 2) <> ROUND(COALESCE(SUM(e.usd), 0), 2)
+            ORDER BY s.shift_date
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+
+def shift_info(shift_id: int):
+    """Смена + её разбивка. None, если такой смены нет."""
+    with db() as conn:
+        s = conn.execute("SELECT * FROM shifts WHERE id = ?", (shift_id,)).fetchone()
+        if not s:
+            return None
+        rows = conn.execute(
+            "SELECT * FROM entries WHERE shift_id = ? ORDER BY site", (shift_id,)
+        ).fetchall()
+        return s, rows
+
+
+def shifts_on(d: date) -> list[sqlite3.Row]:
+    with db() as conn:
+        return conn.execute(
+            "SELECT id, shift_date, total_usd FROM shifts WHERE shift_date = ? ORDER BY id",
+            (d.isoformat(),),
+        ).fetchall()
+
+
+def set_entry(shift_id: int, site: str, usd: float,
+              tokens: float = 0, follows: int = 0) -> None:
+    """Добавляет или заменяет строку площадки в смене."""
+    with db() as conn:
+        conn.execute(
+            "DELETE FROM entries WHERE shift_id = ? AND site = ?", (shift_id, site)
+        )
+        conn.execute(
+            "INSERT INTO entries (shift_id, site, tokens, usd, follows, likes, score)"
+            " VALUES (?, ?, ?, ?, ?, 0, 0)",
+            (shift_id, site, tokens, usd, follows),
+        )
+
+
+def drop_entry(shift_id: int, site: str) -> int:
+    with db() as conn:
+        cur = conn.execute(
+            "DELETE FROM entries WHERE shift_id = ? AND site = ?", (shift_id, site)
+        )
+        return cur.rowcount
+
+
+def set_total(shift_id: int, usd: float) -> bool:
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE shifts SET total_usd = ? WHERE id = ?", (usd, shift_id)
+        )
+        return cur.rowcount > 0

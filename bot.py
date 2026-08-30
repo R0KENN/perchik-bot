@@ -32,6 +32,7 @@ from config import (
     MONTH_REPORT_HOUR,
     REPORT_HOUR,
     REPORT_WEEKDAY,
+    SITE_ALIASES,
     STATS_TOPIC_ID,
     TZ,
 )
@@ -575,6 +576,173 @@ async def cmd_report_month(message: Message, bot: Bot):
     await monthly_report(bot)
     await message.reply("📨 Месячный отчёт отправлен.")
 
+# ---------- ручная правка чеков ----------
+
+def norm_site(name: str) -> str:
+    """Приводит написание площадки к тому, что в SITE_ALIASES."""
+    key = re.sub(r"[^a-zа-я0-9]", "", name.lower())
+    return SITE_ALIASES.get(key, name.strip())
+
+
+@utils_router.message(Command("gaps"))
+async def cmd_gaps(message: Message):
+    rows = storage.shift_gaps()
+    if not rows:
+        await message.reply("✅ Разбивка по сайтам сходится с итогами во всех сменах.")
+        return
+
+    lines = ["⚠️ <b>Смены, где сайты не сходятся с итогом</b>", ""]
+    lost = 0.0
+    for r in rows:
+        d = date.fromisoformat(r["shift_date"]).strftime("%d.%m.%Y")
+        diff = r["total_usd"] - r["sites_usd"]
+        lost += max(0.0, diff)
+        tail = "нет разбивки" if not r["n"] else f"по сайтам {money(r['sites_usd'])}"
+        lines.append(
+            f"<code>#{r['id']}</code> {d} — итог {money(r['total_usd'])}, "
+            f"{tail} (не хватает {money(diff)})"
+        )
+
+    lines += [
+        "",
+        f"Всего потеряно в разбивке: <b>{money(lost)}</b>",
+        "",
+        "Починить: <code>/fix 12 Chaturbate 120.5 3400</code>",
+        "<i>id · площадка · доллары · токены · прирост (два последних необязательны)</i>",
+    ]
+    await message.reply("\n".join(lines[:60]), parse_mode=ParseMode.HTML)
+
+
+@utils_router.message(Command("shift"))
+async def cmd_shift(message: Message, command: CommandObject):
+    arg = (command.args or "").strip()
+    if not arg:
+        await message.reply(
+            "Покажу смену: <code>/shift 12</code> или <code>/shift 14.03.2025</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if arg.isdigit() and len(arg) < 7:
+        info = storage.shift_info(int(arg))
+        if not info:
+            await message.reply("Смены с таким id нет.")
+            return
+        s, rows = info
+        d = date.fromisoformat(s["shift_date"]).strftime("%d.%m.%Y")
+        out = [f"🧾 <b>Смена #{s['id']}</b> · {d} · итог <b>{money(s['total_usd'])}</b>", ""]
+        if not rows:
+            out.append("<i>Разбивки по сайтам нет.</i>")
+        for r in rows:
+            extra = []
+            if r["tokens"]:
+                extra.append(f"{int(r['tokens'])} tk")
+            if r["follows"]:
+                extra.append(f"{r['follows']} 👥")
+            out.append(f"• {r['site']} — {money(r['usd'])}"
+                       + (f" ({', '.join(extra)})" if extra else ""))
+        summ = sum(r["usd"] for r in rows)
+        if abs(summ - s["total_usd"]) > 0.01:
+            out += ["", f"⚠️ Сайты дают {money(summ)}, итог {money(s['total_usd'])}"]
+        await message.reply("\n".join(out), parse_mode=ParseMode.HTML)
+        return
+
+    try:
+        parts = [int(x) for x in re.split(r"[.\-/]", arg)]
+        d = date(parts[2], parts[1], parts[0]) if parts[0] < 32 else date(*parts)
+    except Exception:
+        await message.reply("Не понял дату. Формат: <code>14.03.2025</code>",
+                            parse_mode=ParseMode.HTML)
+        return
+
+    rows = storage.shifts_on(d)
+    if not rows:
+        await message.reply(f"За {d.strftime('%d.%m.%Y')} смен нет.")
+        return
+    body = "\n".join(
+        f"<code>#{r['id']}</code> — {money(r['total_usd'])}" for r in rows
+    )
+    await message.reply(f"🗓 <b>{d.strftime('%d.%m.%Y')}</b>\n{body}",
+                        parse_mode=ParseMode.HTML)
+
+
+@utils_router.message(Command("fix"))
+async def cmd_fix(message: Message, command: CommandObject):
+    args = (command.args or "").split()
+    if len(args) < 3:
+        await message.reply(
+            "🔧 <b>Правка разбивки</b>\n\n"
+            "<code>/fix 12 Chaturbate 120.5 3400 15</code>\n"
+            "id · площадка · доллары · токены · прирост подписчиков\n\n"
+            "Токены и прирост можно не указывать.\n"
+            "Найти проблемные смены: /gaps",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    try:
+        shift_id = int(args[0])
+        site = norm_site(args[1])
+        usd = float(args[2].replace(",", ".").replace("$", ""))
+        tokens = float(args[3].replace(",", ".")) if len(args) > 3 else 0.0
+        follows = int(args[4]) if len(args) > 4 else 0
+    except ValueError:
+        await message.reply("Не разобрал числа. Пример: <code>/fix 12 Chaturbate 120.5 3400</code>",
+                            parse_mode=ParseMode.HTML)
+        return
+
+    if not storage.shift_info(shift_id):
+        await message.reply("Смены с таким id нет. Посмотри /gaps.")
+        return
+
+    storage.set_entry(shift_id, site, usd, tokens, follows)
+    s, rows = storage.shift_info(shift_id)
+    summ = sum(r["usd"] for r in rows)
+    status = "✅ сходится" if abs(summ - s["total_usd"]) <= 0.01 else \
+             f"⚠️ ещё не хватает {money(s['total_usd'] - summ)}"
+    await message.reply(
+        f"Записал: <b>{site}</b> — {money(usd)}"
+        + (f", {int(tokens)} tk" if tokens else "")
+        + (f", +{follows} 👥" if follows else "")
+        + f"\nПо смене #{shift_id}: {money(summ)} из {money(s['total_usd'])} — {status}",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@utils_router.message(Command("unfix"))
+async def cmd_unfix(message: Message, command: CommandObject):
+    args = (command.args or "").split()
+    if len(args) < 2:
+        await message.reply("Удалить площадку из смены: <code>/unfix 12 Chaturbate</code>",
+                            parse_mode=ParseMode.HTML)
+        return
+    try:
+        shift_id = int(args[0])
+    except ValueError:
+        await message.reply("Первым аргументом нужен id смены.")
+        return
+    n = storage.drop_entry(shift_id, norm_site(args[1]))
+    await message.reply("🧹 Удалил." if n else "Такой площадки в этой смене нет.")
+
+
+@utils_router.message(Command("settotal"))
+async def cmd_settotal(message: Message, command: CommandObject):
+    args = (command.args or "").split()
+    if len(args) < 2:
+        await message.reply("Поправить итог смены: <code>/settotal 12 517.52</code>",
+                            parse_mode=ParseMode.HTML)
+        return
+    try:
+        shift_id = int(args[0])
+        usd = float(args[1].replace(",", ".").replace("$", ""))
+    except ValueError:
+        await message.reply("Не разобрал числа.")
+        return
+    ok = storage.set_total(shift_id, usd)
+    await message.reply(f"Итог смены #{shift_id} теперь {money(usd)}" if ok
+                        else "Смены с таким id нет.")
+
+
 
 # ---------- сбор чеков ----------
 
@@ -598,9 +766,21 @@ _thanks_window: dict[tuple[int, int], dict] = {}
 THANKS_WINDOW_SEC = 3600   # окно живёт час
 THANKS_LIMIT = 2           # максимум два сердечка на одну фразу
 
+# Темы, где Перчик вообще открывает рот: чеки и его собственная статистика.
+SOCIAL_TOPICS = {CHECKS_TOPIC_ID, STATS_TOPIC_ID}
+
+
+def social_allowed(message: Message) -> bool:
+    return (
+        message.chat.id == GROUP_ID
+        and (message.message_thread_id or 0) in SOCIAL_TOPICS
+    )
+
+
+_me = None
 _ai_calls: dict[int, list[float]] = {}
 AI_WINDOW_SEC = 900        # окно 15 минут
-AI_WINDOW_LIMIT = 15        # столько ответов максимум за окно
+AI_WINDOW_LIMIT = 8        # столько ответов максимум за окно
 
 
 def ai_quota_ok(chat_id: int) -> bool:
@@ -646,6 +826,9 @@ def build_chat_prompt(message: Message, bot_id: int) -> str:
 
 async def try_social(message: Message, bot: Bot) -> bool:
     """Сердечко на спасибо и ответ через ИИ. True — сообщение обработано."""
+    if not social_allowed(message):
+        return False
+
     text = (message.text or message.caption or "").strip()
     if not text or text.startswith("/"):
         return False
@@ -674,7 +857,10 @@ async def try_social(message: Message, bot: Bot) -> bool:
         _thanks_window.pop(key, None)
 
     # 2. Обращение к боту: ответ на его сообщение или по имени
-    me = await bot.me()
+    global _me
+    if _me is None:
+        _me = await bot.me()
+    me = _me
     r = message.reply_to_message
     to_bot = bool(r and r.from_user and r.from_user.id == me.id)
     named = bool(NAME_RE.search(text)) or f"@{me.username}".lower() in text.lower()

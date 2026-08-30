@@ -57,8 +57,8 @@ AUTO_REPORTS = os.getenv("AUTO_REPORTS", "1") not in ("0", "false", "False", "")
 
 # ИИ-комментарии после смены.
 AI_ENABLED = os.getenv("AI_ENABLED", "0") not in ("0", "false", "False", "")
-AI_PROVIDER = os.getenv("AI_PROVIDER", "anthropic").strip().lower()
-AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.openai.com/v1").strip().rstrip("/")
+AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
+AI_BASE_URL = os.getenv("AI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai").strip().rstrip("/")
 AI_KEY = os.getenv("AI_KEY", "").strip()
-AI_MODEL = os.getenv("AI_MODEL", "claude-haiku-4-5-20251001").strip()
+AI_MODEL = os.getenv("AI_MODEL", "gemini-3.5-flash-lite").strip()
 AI_TIMEOUT = int(os.getenv("AI_TIMEOUT", "25"))
