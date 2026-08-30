@@ -1,5 +1,6 @@
 import asyncio
 import calendar
+import re
 import logging
 from datetime import date, datetime, timedelta
 
@@ -47,6 +48,7 @@ utils_router = Router(name="utils")
 checks_router = Router(name="checks")
 stats_router = Router(name="stats")
 debug_router = Router(name="debug")
+chat_router = Router(name="chat")
 
 guard_router = Router(name="guard")
 
@@ -583,6 +585,129 @@ if IMPORT_TOPIC_ID:
 checks_router.message.filter(F.chat.id == GROUP_ID, F.message_thread_id.in_(CHECK_TOPICS))
 checks_router.edited_message.filter(F.chat.id == GROUP_ID, F.message_thread_id.in_(CHECK_TOPICS))
 
+# ---------- сердечки и болталка ----------
+
+THANKS_RE = re.compile(
+    r"(?i)\b(спасибо\w*|спасиб|спс|благодар\w*|мерси|thanks|thx|"
+    r"красав\w*|молодец|умница|лучший|обожаю)\b"
+)
+NAME_RE = re.compile(r"(?i)\bперчик\w*")
+
+# окно «бот сказал фразу — принимаю спасибо»: ключ (chat_id, thread_id)
+_thanks_window: dict[tuple[int, int], dict] = {}
+THANKS_WINDOW_SEC = 3600   # окно живёт час
+THANKS_LIMIT = 2           # максимум два сердечка на одну фразу
+
+_ai_calls: dict[int, list[float]] = {}
+AI_WINDOW_SEC = 900        # окно 15 минут
+AI_WINDOW_LIMIT = 15        # столько ответов максимум за окно
+
+
+def ai_quota_ok(chat_id: int) -> bool:
+    """Скользящее окно: не больше AI_WINDOW_LIMIT ответов за AI_WINDOW_SEC."""
+    now = datetime.now(TZ).timestamp()
+    calls = [t for t in _ai_calls.get(chat_id, []) if now - t < AI_WINDOW_SEC]
+    if len(calls) >= AI_WINDOW_LIMIT:
+        _ai_calls[chat_id] = calls
+        return False
+    calls.append(now)
+    _ai_calls[chat_id] = calls
+    return True
+
+
+def arm_thanks(sent: Message) -> None:
+    """Бот сказал фразу — открываем окно для двух сердечек."""
+    key = (sent.chat.id, sent.message_thread_id or 0)
+    _thanks_window[key] = {
+        "until": datetime.now(TZ).timestamp() + THANKS_WINDOW_SEC,
+        "users": set(),
+    }
+
+
+def build_chat_prompt(message: Message, bot_id: int) -> str:
+    t = today()
+    day = storage.period_summary(t, t)
+    first, _, _ = _month_bounds(t)
+    month = storage.period_summary(first, t)
+    who = (message.from_user.first_name if message.from_user else "Кто-то") or "Кто-то"
+
+    quoted = ""
+    r = message.reply_to_message
+    if r and r.from_user and r.from_user.id == bot_id:
+        quoted = f"\nТвоя предыдущая реплика: {(r.text or '')[:300]}"
+
+    return (
+        f"Сегодня: {day['usd']:.2f}$ за {day['shifts']} смен.\n"
+        f"С начала месяца: {month['usd']:.2f}$ за {month['shifts']} смен."
+        f"{quoted}\n"
+        f"{who} пишет тебе: {(message.text or message.caption or '')[:500]}"
+    )
+
+
+async def try_social(message: Message, bot: Bot) -> bool:
+    """Сердечко на спасибо и ответ через ИИ. True — сообщение обработано."""
+    text = (message.text or message.caption or "").strip()
+    if not text or text.startswith("/"):
+        return False
+
+    now = datetime.now(TZ).timestamp()
+    key = (message.chat.id, message.message_thread_id or 0)
+    win = _thanks_window.get(key)
+
+    # 1. Спасибо в окне после фразы бота
+    if win and now < win["until"] and THANKS_RE.search(text):
+        uid = message.from_user.id if message.from_user else 0
+        if uid not in win["users"] and len(win["users"]) < THANKS_LIMIT:
+            win["users"].add(uid)
+            try:
+                await bot.set_message_reaction(
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    reaction=[ReactionTypeEmoji(emoji="❤️")],
+                )
+            except Exception as e:
+                log.debug("Сердечко не поставилось: %s", e)
+            if len(win["users"]) >= THANKS_LIMIT:
+                _thanks_window.pop(key, None)
+            return True
+    elif win and now >= win["until"]:
+        _thanks_window.pop(key, None)
+
+    # 2. Обращение к боту: ответ на его сообщение или по имени
+    me = await bot.me()
+    r = message.reply_to_message
+    to_bot = bool(r and r.from_user and r.from_user.id == me.id)
+    named = bool(NAME_RE.search(text)) or f"@{me.username}".lower() in text.lower()
+    if not (to_bot or named):
+        return False
+
+    if not ai_quota_ok(message.chat.id):
+        log.info("Лимит ИИ-ответов исчерпан на 15 минут, молчу")
+        return False
+
+    try:
+        await bot.send_chat_action(
+            chat_id=message.chat.id,
+            action="typing",
+            message_thread_id=message.message_thread_id,
+        )
+    except Exception:
+        pass
+
+    answer = await ai.chat_reply(build_chat_prompt(message, me.id))
+    await message.reply(answer)
+    return True
+
+
+@chat_router.message()
+async def social_catch(message: Message, bot: Bot) -> None:
+    """Болталка в темах, где нет чеков."""
+    if message.chat.id != GROUP_ID:
+        return
+    await try_social(message, bot)
+
+
+
 async def send_shift_comment(message: Message, parsed) -> None:
     """Собирает факты о смене и просит ИИ прокомментировать."""
     d = parsed.shift_date
@@ -611,7 +736,8 @@ async def send_shift_comment(message: Message, parsed) -> None:
         facts.append(f"Цель на месяц: {goal:.0f}$, закрыто {month['usd'] / goal * 100:.0f}%")
 
     text = await ai.shift_comment("\n".join(facts))
-    await message.reply(f"🌶 {text}")
+    sent = await message.reply(f"🌶 {text}")
+    arm_thanks(sent)
 
 
 async def handle_check(message: Message, bot: Bot, edited: bool = False):
@@ -622,6 +748,8 @@ async def handle_check(message: Message, bot: Bot, edited: bool = False):
     parsed = parse_check(text, fallback)
     if not parsed:
         log.info("Сообщение %s не похоже на чек", message.message_id)
+        if not edited:
+            await try_social(message, bot)
         return
 
     storage.upsert_shift(message.chat.id, message.message_id, message.message_thread_id, parsed)
@@ -879,7 +1007,8 @@ async def main():
     storage.init_db()
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
-    dp.include_routers(guard_router, utils_router, stats_router, checks_router, debug_router)
+    dp.include_routers(guard_router, utils_router, stats_router, checks_router,
+                       chat_router, debug_router)
 
     try:
         me = await bot.get_me()

@@ -27,7 +27,7 @@ FALLBACK = [
 ]
 
 
-async def _anthropic(facts: str) -> str:
+async def _anthropic(facts: str, system: str = SYSTEM) -> str:
     url = "https://api.anthropic.com/v1/messages"
     headers = {
         "x-api-key": AI_KEY,
@@ -37,7 +37,7 @@ async def _anthropic(facts: str) -> str:
     payload = {
         "model": AI_MODEL,
         "max_tokens": 200,
-        "system": SYSTEM,
+        "system": system,
         "messages": [{"role": "user", "content": facts}],
     }
     timeout = aiohttp.ClientTimeout(total=AI_TIMEOUT)
@@ -49,14 +49,14 @@ async def _anthropic(facts: str) -> str:
     return "".join(b.get("text", "") for b in data["content"]).strip()
 
 
-async def _openai(facts: str) -> str:
+async def _openai(facts: str, system: str = SYSTEM) -> str:
     url = f"{AI_BASE_URL}/chat/completions"
     headers = {"Authorization": f"Bearer {AI_KEY}", "content-type": "application/json"}
     payload = {
         "model": AI_MODEL,
         "max_tokens": 200,
         "messages": [
-            {"role": "system", "content": SYSTEM},
+            {"role": "system", "content": system},
             {"role": "user", "content": facts},
         ],
     }
@@ -80,3 +80,35 @@ async def shift_comment(facts: str) -> str:
     except Exception as e:
         log.warning("ИИ не ответил (%s), беру запасную фразу", e)
         return random.choice(FALLBACK)
+
+
+
+CHAT_SYSTEM = (
+    "Ты — Перчик, бот-напарник в рабочем чате. Ведёшь учёт смен и заработка. "
+    "Отвечай коротко: одно-два предложения, по-русски, живым разговорным тоном, "
+    "можно с лёгкой иронией. Без канцелярита, без коучинга, без списков. "
+    "Максимум один эмодзи. Если спрашивают про цифры — отвечай только по тем данным, "
+    "что тебе дали, ничего не выдумывай. Если данных нет, так и скажи."
+)
+
+CHAT_FALLBACK = [
+    "Я тут, но мозги сейчас offline. Спроси попозже.",
+    "Слышу тебя. Правда, ответить умного нечего.",
+    "Тут я. Цифры смотри через /stats.",
+]
+
+
+async def chat_reply(prompt: str) -> str:
+    """Свободный ответ в чате. Никогда не бросает исключение."""
+    if not (AI_ENABLED and AI_KEY):
+        return random.choice(CHAT_FALLBACK)
+    try:
+        if AI_PROVIDER == "openai":
+            text = await _openai(prompt, CHAT_SYSTEM)
+        else:
+            text = await _anthropic(prompt, CHAT_SYSTEM)
+        text = text.strip().strip('"')
+        return text[:600] if text else random.choice(CHAT_FALLBACK)
+    except Exception as e:
+        log.warning("ИИ не ответил в чате (%s)", e)
+        return random.choice(CHAT_FALLBACK)
