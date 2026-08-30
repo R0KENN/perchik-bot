@@ -16,10 +16,12 @@ from aiogram.types import (
     ReactionTypeEmoji,
 )
 
+import ai
 import charts
 import storage
 from article import extract_text
 from config import (
+    AI_ENABLED,
     ALWAYS_SHOW,
     AUTO_REPORTS,
     BOT_TOKEN,
@@ -581,6 +583,36 @@ if IMPORT_TOPIC_ID:
 checks_router.message.filter(F.chat.id == GROUP_ID, F.message_thread_id.in_(CHECK_TOPICS))
 checks_router.edited_message.filter(F.chat.id == GROUP_ID, F.message_thread_id.in_(CHECK_TOPICS))
 
+async def send_shift_comment(message: Message, parsed) -> None:
+    """Собирает факты о смене и просит ИИ прокомментировать."""
+    d = parsed.shift_date
+    if not isinstance(d, date):
+        d = date.fromisoformat(str(d))
+
+    first, _, _ = _month_bounds(d)
+    month = storage.period_summary(first, d)
+    prev = storage.period_summary(d - timedelta(days=30), d - timedelta(days=1))
+    avg = prev["usd"] / prev["shifts"] if prev["shifts"] else 0
+
+    sites = ", ".join(f"{e.site} {e.usd:.0f}$" for e in parsed.entries) or "нет разбивки"
+    goal = storage.get_goal(d.strftime("%Y-%m")) or 0
+
+    facts = [
+        f"Дата смены: {d.strftime('%d.%m.%Y')} ({WEEKDAYS[int(d.strftime('%w'))]})",
+        f"Заработано за смену: {parsed.total_usd:.2f}$",
+        f"По площадкам: {sites}",
+    ]
+    if avg:
+        diff = parsed.total_usd - avg
+        facts.append(f"Средняя смена за последние 30 дней: {avg:.2f}$ (разница {diff:+.2f}$)")
+    if month["shifts"]:
+        facts.append(f"С начала месяца: {month['usd']:.2f}$ за {month['shifts']} смен")
+    if goal:
+        facts.append(f"Цель на месяц: {goal:.0f}$, закрыто {month['usd'] / goal * 100:.0f}%")
+
+    text = await ai.shift_comment("\n".join(facts))
+    await message.reply(f"🌶 {text}")
+
 
 async def handle_check(message: Message, bot: Bot, edited: bool = False):
     text = extract_text(message)
@@ -606,6 +638,12 @@ async def handle_check(message: Message, bot: Bot, edited: bool = False):
         )
     except Exception as e:
         log.debug("Реакция не поставилась: %s", e)
+
+    if AI_ENABLED and not edited:
+        try:
+            await send_shift_comment(message, parsed)
+        except Exception:
+            log.exception("Комментарий к смене не отправился")
 
 
 @checks_router.message(Command("forget"))

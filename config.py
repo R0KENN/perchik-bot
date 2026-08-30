@@ -53,3 +53,12 @@ REPORT_WEEKDAY = int(os.getenv("REPORT_WEEKDAY", "6"))
 REPORT_HOUR = int(os.getenv("REPORT_HOUR", "21"))
 MONTH_REPORT_HOUR = int(os.getenv("MONTH_REPORT_HOUR", "12"))
 AUTO_REPORTS = os.getenv("AUTO_REPORTS", "1") not in ("0", "false", "False", "")
+
+
+# ИИ-комментарии после смены.
+AI_ENABLED = os.getenv("AI_ENABLED", "0") not in ("0", "false", "False", "")
+AI_PROVIDER = os.getenv("AI_PROVIDER", "anthropic").strip().lower()
+AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.openai.com/v1").strip().rstrip("/")
+AI_KEY = os.getenv("AI_KEY", "").strip()
+AI_MODEL = os.getenv("AI_MODEL", "claude-haiku-4-5-20251001").strip()
+AI_TIMEOUT = int(os.getenv("AI_TIMEOUT", "25"))
